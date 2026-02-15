@@ -1,0 +1,29 @@
+<link href="/pagefind/pagefind-ui.css" rel="stylesheet">
+<script src="/pagefind/pagefind-ui.js"></script>
+
+<style>
+  .pagefind-ui { max-width: 600px; }
+  .pagefind-ui__search-input {
+    padding: 0.75rem 1rem;
+    font-size: 1rem;
+    border: 2px solid var(--border);
+    border-radius: 8px;
+    background: var(--entry);
+    color: var(--content);
+  }
+  .pagefind-ui__search-input:focus {
+    border-color: var(--secondary);
+    outline: none;
+  }
+</style>
+
+<div id="search"></div>
+<script>
+  window.addEventListener('DOMContentLoaded', () => {
+    new PagefindUI({
+      element: "#search",
+      showSubResults: true,
+      showImages: false
+    });
+  });
+</script>
