@@ -10,9 +10,9 @@ TocOpen: true
 
 You shipped an LLM-powered feature. Users love it. Then the invoice arrives — and nobody can explain where $4,000 in API costs went last Tuesday. Sound familiar?
 
-LLMs are black boxes in production. You can't see how many tokens each request burns, which model is slower, or why a batch job at 3 AM quietly retried thousands of failed completions and doubled your daily spend. Traditional APM tools are starting to add LLM support, but it usually lands as a separate product with its own pricing. Dedicated LLM observability platforms offer deeper insight out of the box, though many require a proprietary SDK or proxy that ties your instrumentation to a single vendor.
+LLMs are black boxes in production. You can't see how many tokens each request burns, which model is slower, or why a batch job at 3 AM quietly retried thousands of failed completions and doubled your daily spend. Traditional APM tools are starting to add LLM support, though coverage and pricing vary — some bundle it in, others charge extra. Dedicated LLM observability platforms offer deeper insight out of the box, though many require a proprietary SDK or proxy that ties your instrumentation to a single vendor.
 
-In this post, I'll walk you through building a full LLM monitoring stack using **open standards** — [OpenTelemetry](https://opentelemetry.io/), [OpenLLMetry](https://github.com/traceloop/openllmetry), and [Elastic APM](https://www.elastic.co/observability/application-performance-monitoring). By the end, you'll have cost tracking, latency metrics, error correlation, and multi-model comparison running in Kibana, all without vendor lock-in.
+In this post, I'll walk you through building a full LLM monitoring stack using **open standards** — [OpenTelemetry](https://opentelemetry.io/), [OpenLLMetry](https://github.com/traceloop/openllmetry), and [Elastic APM](https://www.elastic.co/observability/application-performance-monitoring). By the end, you'll have cost tracking, latency metrics, error correlation, and multi-model comparison running in Kibana, all with vendor-neutral telemetry. Your backend is swappable (any OTLP-compatible system works), and the instrumentation uses open-source libraries — though switching away from OpenLLMetry's decorators would require code changes, just as with any instrumentation library.
 
 ---
 
@@ -51,6 +51,8 @@ OpenLLMetry is Traceloop's open-source instrumentation layer built on top of Ope
 When you decorate a function with `@task`, OpenLLMetry automatically captures `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.system`, and more. No manual attribute setting required. The `@workflow` decorator creates a top-level span that groups related `@task` spans into a single trace hierarchy, giving you end-to-end visibility into multi-step LLM operations.
 
 > **Note:** Some `gen_ai.*` attribute names are evolving as the semantic conventions mature — check the [latest spec](https://opentelemetry.io/docs/specs/semconv/gen-ai/) for current names.
+
+> **Privacy note:** OpenLLMetry logs prompts, completions, and embeddings to span attributes by default. If your LLM calls process user data, set `TRACELOOP_TRACE_CONTENT=false` to disable content capture before deploying to production. See [Traceloop's privacy docs](https://www.traceloop.com/docs/openllmetry/privacy/traces) for selective per-workflow controls.
 
 ---
 
@@ -239,7 +241,7 @@ def design_restaurant_menu():
 
 This creates a deeply nested trace with 15-20 spans: parallel execution branches, cross-model calls (GPT for planning, Claude for creativity), retry attempts visible as iteration counters, and the full agent-to-agent data flow. It's the perfect stress test for any APM system — and it renders beautifully in Kibana's waterfall view.
 
-Context propagation to threads is handled automatically by the Traceloop SDK. When you call `Traceloop.init()`, the SDK activates OpenTelemetry's [`ThreadingInstrumentor`](https://opentelemetry-python-contrib.readthedocs.io/en/latest/instrumentation/threading/threading.html), which monkey-patches `ThreadPoolExecutor.submit` to capture and re-attach the current trace context in worker threads. This ensures that spans created by `@task`-decorated functions running inside `ThreadPoolExecutor` workers are correctly parented to the calling `@workflow` span — no manual `contextvars.copy_context()` needed.
+Context propagation to threads is handled automatically by the Traceloop SDK. `Traceloop.init()` activates OpenTelemetry's [`ThreadingInstrumentor`](https://opentelemetry-python-contrib.readthedocs.io/en/latest/instrumentation/threading/threading.html), which ensures that the current trace context is captured and re-attached in `ThreadPoolExecutor` worker threads. Spans created by `@task`-decorated functions running in the thread pool are correctly parented to the calling `@workflow` span — no manual `contextvars.copy_context()` needed.
 
 ---
 
@@ -307,7 +309,7 @@ Here's the gap that motivated the most interesting piece of engineering in this 
 
 ![LLM Cost Injection Architecture — how cost data flows from LiteLLM pricing through the span exporter](/images/monitoring-llm-usage/llm-cost-injection-architecture.png)
 
-The solution is a custom `CostEnrichingSpanExporter` that wraps the real OTLP exporter, intercepting the export pipeline to inject cost attributes into LLM spans before they're sent to the backend. It works by mutating span attributes in-place — a pragmatic tradeoff that bypasses the SDK's read-only span convention but avoids the complexity of rebuilding spans from scratch.
+The solution is a custom `CostEnrichingSpanExporter` that wraps the real OTLP exporter, intercepting the export pipeline to inject cost attributes into LLM spans before they're sent to the backend. It works by mutating `span._attributes` in-place — a pragmatic tradeoff that bypasses the SDK's read-only span convention but avoids the complexity of rebuilding spans from scratch. Since `_attributes` is an internal implementation detail (not part of the public OTel API), pin your `opentelemetry-sdk` version and test after upgrades.
 
 ### How It Works
 
@@ -349,6 +351,8 @@ When `export()` is called by the `BatchSpanProcessor`, the wrapper:
 6. Forwards everything to the wrapped exporter
 
 Non-LLM spans pass through untouched — negligible overhead.
+
+> **Important:** These cost estimates are approximations, not invoice-accurate figures. Provider billing includes nuances this approach doesn't capture — OpenAI's cached input tokens (90% cheaper), Anthropic's prompt caching tiers, batch API discounts, and image/tool token pricing. Use this dashboard for relative cost comparison and trend monitoring, not as a replacement for your provider billing dashboard.
 
 ### The Pricing Database
 
