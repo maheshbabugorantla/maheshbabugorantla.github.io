@@ -1,0 +1,47 @@
+baseURL = 'https://maheshbabugorantla.github.io/'
+languageCode = 'en-us'
+title = 'Mahesh Babu Gorantla - Tech Blog'
+theme = 'PaperMod'
+
+[params]
+  ShowToc = true
+  TocOpen = true
+  ShowCodeCopyButtons = true
+  ShowReadingTime = true
+  ShowShareButtons = true
+  ShowPostNavLinks = true
+  ShowBreadCrumbs = true
+
+[params.homeInfoParams]
+  Title = "Hi, I'm Mahesh Babu Gorantla"
+  Content = "Full-stack engineer writing about Python, Django, Kubernetes, and backend development"
+
+[[params.socialIcons]]
+  name = "github"
+  url = "https://github.com/maheshbabugorantla"
+
+[[params.socialIcons]]
+  name = "linkedin"
+  url = "https://linkedin.com/in/maheshbabugorantla"
+
+[[menu.main]]
+  name = "Posts"
+  url = "/posts/"
+  weight = 1
+
+[[menu.main]]
+  name = "Tags"
+  url = "/tags/"
+  weight = 2
+
+[[menu.main]]
+  name = "About"
+  url = "/about/"
+  weight = 3
+
+[markup]
+  [markup.highlight]
+    style = 'monokai'
+    lineNos = true
+    lineNumbersInTable = true
+    noClasses = false
