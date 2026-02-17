@@ -8,31 +8,13 @@ ShowToc: true
 TocOpen: true
 ---
 
-You shipped an LLM-powered feature. Users love it. Then the invoice arrives — and nobody can explain where $4,000 in API costs went last Tuesday. Sound familiar?
+You shipped an LLM-powered feature. Users love it. Then the invoice arrives — and nobody can explain where $4,000 in API costs went last Tuesday.
 
 LLMs are black boxes in production. You can't see how many tokens each request burns, which model is slower, or why a batch job at 3 AM quietly retried thousands of failed completions and doubled your daily spend. Traditional APM tools are starting to add LLM support, though coverage and pricing vary — some bundle it in, others charge extra. Dedicated LLM observability platforms offer deeper insight out of the box, though many require a proprietary SDK or proxy that ties your instrumentation to a single vendor.
 
+This guide is for teams that already run Elastic (or are evaluating it) and want to add LLM observability without adopting a separate vendor. If you're using a different backend, the OpenTelemetry instrumentation still applies — only the exporter configuration changes.
+
 In this post, I'll walk you through building a full LLM monitoring stack using **open standards** — [OpenTelemetry](https://opentelemetry.io/), [OpenLLMetry](https://github.com/traceloop/openllmetry), and [Elastic APM](https://www.elastic.co/observability/application-performance-monitoring). By the end, you'll have cost tracking, latency metrics, error correlation, and multi-model comparison running in Kibana, with **vendor-neutral telemetry** (OpenTelemetry + OTLP) and a **swappable instrumentation layer** (OpenLLMetry is one option among several).
-
----
-
-## 0. Production Safety: Prompts, PII, and Trace Size
-
-OpenLLMetry can log prompts and completions into span attributes. That's useful for debugging, and also a great way to leak sensitive data into your observability backend.
-
-**Default stance for production:** disable content tracing unless you explicitly need it.
-
-```bash
-export TRACELOOP_TRACE_CONTENT=false
-```
-
-When content tracing is disabled, OpenLLMetry logs metadata (model name, token counts, latency) **without** capturing prompts or responses. See [Traceloop's privacy docs](https://www.traceloop.com/docs/openllmetry/privacy/traces) for selective per-workflow controls.
-
-Rules of thumb:
-
-* Don't log raw customer identifiers. Hash them (or use a surrogate ID).
-* Treat traces as a data store: retention + access control matter.
-* If you must log content, redact aggressively (emails, phone numbers, tokens).
 
 ---
 
@@ -55,7 +37,7 @@ Why does OTel matter for LLM apps? Because it's **vendor-neutral** and **composa
 
 ## 2. Enter OpenLLMetry
 
-So OpenTelemetry gives us the plumbing. But LLM calls have unique attributes — model names, token counts, prompt content, system identifiers — that standard OTel instrumentation doesn't capture. That's where [OpenLLMetry](https://github.com/traceloop/openllmetry) comes in.
+OpenTelemetry handles generic telemetry. LLM calls have unique attributes — model names, token counts, prompt content, system identifiers — that standard OTel instrumentation doesn't capture. That's where [OpenLLMetry](https://github.com/traceloop/openllmetry) comes in.
 
 ![How OpenTelemetry concepts map to OpenLLMetry](/images/monitoring-llm-usage/otel-to-openllmetry.png)
 
@@ -76,7 +58,7 @@ When you decorate a function with `@task`, OpenLLMetry automatically captures `g
 
 ## 3. Before vs After: The Code
 
-This is where the value becomes concrete. Let me show you what LLM instrumentation looks like with raw OpenTelemetry versus OpenLLMetry.
+Here's what LLM instrumentation looks like with raw OpenTelemetry versus OpenLLMetry.
 
 ![Before vs After — manual instrumentation vs OpenLLMetry auto-instrumentation](/images/monitoring-llm-usage/before-after-comparison.png)
 
@@ -135,6 +117,7 @@ That's 4 imports, manual provider/processor/exporter wiring, manual span creatio
 Setup — 2 imports, 1 function call:
 
 ```python
+import os
 from traceloop.sdk import Traceloop
 from traceloop.sdk.decorators import workflow, task
 
@@ -145,6 +128,8 @@ Traceloop.init(
     disable_batch=False
 )
 ```
+
+> **Production safety: prompts, PII, and trace size.** OpenLLMetry can log prompts and completions into span attributes — useful for debugging, but also a way to leak sensitive data into your observability backend. **Disable content tracing in production** unless you explicitly need it: `export TRACELOOP_TRACE_CONTENT=false`. With content tracing disabled, OpenLLMetry logs metadata (model name, token counts, latency) without capturing prompts or responses. Don't log raw customer identifiers (hash them or use a surrogate ID), treat traces as a data store where retention and access control matter, and if you must log content, redact aggressively. See [Traceloop's privacy docs](https://www.traceloop.com/docs/openllmetry/privacy/traces) for selective per-workflow controls.
 
 And the business logic stays clean — just add decorators:
 
@@ -172,13 +157,15 @@ def call_openai(prompt, model="gpt-4", temperature=0.7):
     }
 
 @workflow(name="recipe_generation_workflow")
-def generate_recipe(provider, dish_name, ...):
-    prompt = generate_recipe_prompt(dish_name, ...)
+def generate_recipe(provider, dish_name, cuisine_type="Italian", servings=4):
+    prompt = generate_recipe_prompt(dish_name, cuisine_type, servings)
     result = call_openai(prompt, model=model)
     return result
 ```
 
 The key takeaway: **zero manual span or attribute management.** OpenLLMetry intercepts the OpenAI and Anthropic client libraries, captures all the `gen_ai.*` attributes automatically, and your functions contain nothing but business logic.
+
+> **What about OTel's own auto-instrumentation?** The `opentelemetry-instrumentation-openai` package also auto-captures `gen_ai.*` attributes without manual span code. The tradeoff is that it gives you auto-instrumentation for LLM calls but not the `@workflow`/`@task` decorator model for grouping business logic into named trace hierarchies. OpenLLMetry adds that layer on top, which is why I chose it for this project. If you only need LLM call telemetry without workflow grouping, the native OTel instrumentation is a lighter option.
 
 ---
 
@@ -194,12 +181,14 @@ The stack has six components, all running in Docker Compose on a single bridge n
 2. **OpenLLMetry SDK** — Auto-instruments OpenAI and Anthropic client libraries, captures `gen_ai.*` attributes, exports via OTLP/HTTP.
 3. **OpenTelemetry Collector** — Receives OTLP/HTTP on port 4318, batches spans, applies memory limits, and routes to APM Server via OTLP/gRPC.
 4. **APM Server** — Natively ingests OTLP trace data and indexes it into Elasticsearch.
-5. **Elasticsearch** — Stores all trace data. The `gen_ai.*` span attributes land in Elasticsearch as `labels.gen_ai_*` fields (dots replaced with underscores), with numeric values accessible for aggregation.
+5. **Elasticsearch** — Stores all trace data. The `gen_ai.*` span attributes land in Elasticsearch as `labels.gen_ai_*` (strings) or `numeric_labels.gen_ai_*` (numbers), with dots replaced by underscores.
 6. **Kibana** — Provides the APM UI with service maps, trace waterfalls, and custom dashboards.
 
-> **Field mapping reality (Elastic APM + OTel):** Only a subset of OpenTelemetry attributes are mapped to first-class Elastic fields. If an attribute doesn't have a predefined mapping, it's stored under `labels.*`, with dots replaced by underscores (e.g., `gen_ai.usage.input_tokens` -> `labels.gen_ai_usage_input_tokens`). See [Elastic's OTel attributes docs](https://www.elastic.co/docs/solutions/observability/apm/opentelemetry/attributes) for the full mapping table.
+> **Field mapping reality (Elastic APM + OTel):** Only a subset of OpenTelemetry attributes are mapped to first-class Elastic fields. Unmapped attributes are stored under `labels.*` (strings) or `numeric_labels.*` (numbers), with dots replaced by underscores. For example: `gen_ai.request.model` → `labels.gen_ai_request_model`, `gen_ai.usage.input_tokens` → `numeric_labels.gen_ai_usage_input_tokens`. See [Elastic's OTel attributes docs](https://www.elastic.co/docs/solutions/observability/apm/opentelemetry/attributes) for the full mapping table.
 
 The data flow is straightforward: your app sends OTLP/HTTP to the Collector, which forwards OTLP/gRPC to APM Server, which writes to Elasticsearch. Kibana reads from Elasticsearch. No custom adapters, no proprietary protocols.
+
+I considered sending OTLP directly from the app to APM Server, skipping the Collector entirely. It works for a single service, but the Collector gives you a buffer for backpressure, a place to add processors later (attribute filtering, sampling), and decouples your app from the backend topology. For anything beyond a demo, it's worth the extra container.
 
 Here's the Docker Compose overview:
 
@@ -216,11 +205,13 @@ networks:
     driver: bridge
 ```
 
+> See the full [`docker-compose.yml`](https://github.com/maheshbabugorantla/llm-observability-with-elasticapm/blob/main/docker-compose.yml) and [`otel-collector-config.yaml`](https://github.com/maheshbabugorantla/llm-observability-with-elasticapm/blob/main/otel-collector-config.yaml) in the companion repo.
+
 ---
 
 ## 5. Building a Multi-Agent Workflow
 
-A single LLM call is easy to monitor. The real challenge is multi-agent systems where multiple models collaborate, run in parallel, retry on failure, and feed each other's outputs. That's the scenario I built to put this stack through its paces.
+The real test for an APM stack is multi-agent systems where multiple models collaborate, run in parallel, retry on failure, and feed each other's outputs. That's the scenario I built to put this stack through its paces.
 
 ![Multi-Agent Workflow — 4 AI agents: Coordinator, Chef, Sommelier, Nutritionist](/images/monitoring-llm-usage/multi-agent-workflow.png)
 
@@ -245,27 +236,31 @@ The workflow runs in 5 phases:
 @workflow(name="restaurant_menu_design_workflow")
 def design_restaurant_menu():
     # Phase 1: Coordinator plans (GPT)
-    menu_plan = coordinator_plan_menu_structure(cuisine, ...)
+    menu_plan = coordinator_plan_menu_structure(cuisine)
 
     # Phase 2: Parallel execution (Chef + Nutritionist + Sommelier)
-    research = parallel_agent_research(menu_plan, ...)
+    research = parallel_agent_research(menu_plan)
 
     # Phase 3: Refinement loop (Claude ↔ Claude Haiku)
-    refined = refine_recipes_with_feedback(research["recipes"], ...)
+    refined = refine_recipes_with_feedback(research["recipes"])
 
     # Phase 4: Wine pairing (GPT, with retry)
-    wines = pair_wines_with_courses(refined, ...)
+    wines = pair_wines_with_courses(refined)
 
     return final_menu
 ```
 
 This creates a deeply nested trace with 15-20 spans: parallel execution branches, cross-model calls (GPT for planning, Claude for creativity), retry attempts visible as iteration counters, and the full agent-to-agent data flow. It's the perfect stress test for any APM system — and it renders beautifully in Kibana's waterfall view.
 
+![Trace waterfall in Kibana APM — nested spans showing parallel agent execution and cross-model calls](/images/monitoring-llm-usage/trace-waterfall.png)
+
 Context propagation across threads is **not automatic in Python**. If you run tasks in a thread pool, you need threading context propagation so spans created in worker threads remain parented to the originating workflow span.
 
 Traceloop/OpenLLMetry enables OpenTelemetry's [threading context propagation](https://opentelemetry-python-contrib.readthedocs.io/en/latest/instrumentation/threading/threading.html) so the active trace context follows work scheduled onto threads. The key idea is **propagate context**, not "generate extra telemetry."
 
-If you ever see parallel tasks showing up as separate traces in Kibana, context propagation is the first thing to verify.
+If you ever see parallel tasks showing up as separate traces in Kibana, context propagation is the first thing to verify. This was the most time-consuming debugging problem in the entire project. The symptoms are subtle — everything works, traces appear, but parallel tasks show up as orphaned root spans instead of children of the workflow. If you're seeing that, check context propagation before anything else.
+
+> Full implementation: [`app/app.py`](https://github.com/maheshbabugorantla/llm-observability-with-elasticapm/blob/main/app/app.py)
 
 ---
 
@@ -291,6 +286,10 @@ Eight capabilities, each powered by the `gen_ai.*` attributes that OpenLLMetry c
 In the Kibana APM UI, you can explore these through the **service map** (see your app's dependencies on LLM providers), **trace waterfall** (drill into individual requests), and **span metadata** (inspect every `gen_ai.*` attribute on each LLM call).
 
 > **Sampling warning:** If you sample traces (e.g., 10%), dashboards built from trace data will underestimate tokens and cost unless you compensate. For cost governance, prefer always-on LLM spans or emit token/cost counters as separate OTel metrics alongside traces.
+
+> **A note on streaming:** The examples in this post use non-streaming completions. OpenLLMetry supports streaming, but the behavior differs — token counts are accumulated incrementally and the span closes when the stream finishes, which can affect latency measurements. If your app streams responses, verify instrumentation behavior with your specific provider SDK version before relying on the metrics.
+
+> **Traces vs. metrics for cost tracking:** This post uses trace-based cost attribution, which gives you per-request granularity. At scale, you may also want to emit OTel metrics (e.g., a `gen_ai.cost.total_usd` counter and a `gen_ai.latency` histogram) alongside traces. Metrics are pre-aggregated, cheaper to store, and aren't affected by trace sampling. A common production pattern is: always-on metrics for dashboards and alerts, sampled traces for debugging specific requests.
 
 ---
 
@@ -325,20 +324,22 @@ curl -X POST "http://localhost:5601/api/saved_objects/_import?overwrite=true" \
   --form file=@kibana/llm-observability-dashboards.ndjson
 ```
 
+> Dashboard definition and setup script: [`kibana/`](https://github.com/maheshbabugorantla/llm-observability-with-elasticapm/tree/main/kibana)
+
 ### How to build or modify panels (field names that matter)
 
-Because unmapped OTel attributes land under `labels.*` (flattened), your token/cost fields will look like:
+Because unmapped OTel attributes land under `labels.*` (strings) or `numeric_labels.*` (numbers), your token/cost fields will look like:
 
-- `labels.gen_ai_usage_input_tokens`
-- `labels.gen_ai_usage_output_tokens`
-- `labels.gen_ai_cost_total_usd`
+- `numeric_labels.gen_ai_usage_input_tokens`
+- `numeric_labels.gen_ai_usage_output_tokens`
+- `numeric_labels.gen_ai_cost_total_usd`
 - `labels.gen_ai_request_model` (or `labels.gen_ai_response_model`)
 
 Elastic stores span duration as `span.duration.us`.
 
 Example Lens formulas:
-- **Total tokens** = `sum(labels.gen_ai_usage_input_tokens)` + `sum(labels.gen_ai_usage_output_tokens)`
-- **Avg cost per call** = `sum(labels.gen_ai_cost_total_usd)` / `count()`
+- **Total tokens** = `sum(numeric_labels.gen_ai_usage_input_tokens)` + `sum(numeric_labels.gen_ai_usage_output_tokens)`
+- **Avg cost per call** = `sum(numeric_labels.gen_ai_cost_total_usd)` / `count()`
 - **P95 latency** = `percentile(span.duration.us, 95)`
 
 > **Tip:** If your field names differ, open any LLM span in APM -> Metadata and copy the exact field names from there.
@@ -398,6 +399,24 @@ Non-LLM spans pass through untouched — negligible overhead.
 
 > **Cost math vs invoice reality:** Token-based estimates can differ from provider billing due to system prompts, tool calls, cached tokens, rounding, tiered pricing, or provider-side adjustments. Treat this as an allocation and monitoring signal — not a perfect invoice replica.
 
+> **Production alternative — OTel SpanProcessor:** Instead of mutating read-only spans in the exporter, inject cost at span creation via a custom `SpanProcessor`. The `on_end` hook receives writable spans:
+>
+> ```python
+> class CostEnrichingSpanProcessor(SpanProcessor):
+>     def on_end(self, span: ReadableSpan) -> None:
+>         if 'gen_ai.system' in span.attributes:
+>             cost = self.pricing_db.get_cost(
+>                 span.attributes.get('gen_ai.response.model'),
+>                 span.attributes.get('gen_ai.usage.input_tokens', 0),
+>                 span.attributes.get('gen_ai.usage.output_tokens', 0),
+>             )
+>             self.cost_counter.add(cost['gen_ai.cost.total_usd'], {
+>                 'model': span.attributes.get('gen_ai.response.model', 'unknown')
+>             })
+> ```
+>
+> This avoids private API dependencies and works with any OTel backend. The demo repo uses the exporter approach for simplicity — see [`app/llm_cost_injector.py`](https://github.com/maheshbabugorantla/llm-observability-with-elasticapm/blob/main/app/llm_cost_injector.py) for the full implementation.
+
 ### The Pricing Database
 
 ![LiteLLM Pricing Database — hundreds of models with per-token pricing](/images/monitoring-llm-usage/litellm-pricing-database.jpg)
@@ -409,6 +428,8 @@ The `LiteLLMPricingDatabase` class:
 - **Caches locally** to avoid network calls on subsequent starts
 - **Auto-refreshes** when the cache is older than 24 hours
 - **Fuzzy matches** model names — `gpt-4o-2024-08-06` resolves to `gpt-4o`, provider prefixes like `openai/gpt-4o` are stripped automatically
+
+I initially considered maintaining my own pricing JSON, but model pricing changes frequently enough that it would be stale within weeks. LiteLLM's database is community-maintained and covers providers I haven't even tested yet. The tradeoff is a GitHub dependency at startup, which the local caching mitigates.
 
 ### Wiring It Up
 
@@ -431,17 +452,19 @@ inject_llm_cost_tracking()  # Wraps the exporter, loads pricing
 ```
 
 After this, every LLM span automatically includes cost data. The attributes appear in Elastic APM as:
-- `labels.gen_ai_cost_total_usd`
-- `labels.gen_ai_cost_input_usd`
-- `labels.gen_ai_cost_output_usd`
+- `numeric_labels.gen_ai_cost_total_usd`
+- `numeric_labels.gen_ai_cost_input_usd`
+- `numeric_labels.gen_ai_cost_output_usd`
 - `labels.gen_ai_cost_provider`
 - `labels.gen_ai_cost_model_resolved`
+
+> Full source: [`app/llm_cost_injector.py`](https://github.com/maheshbabugorantla/llm-observability-with-elasticapm/blob/main/app/llm_cost_injector.py)
 
 ---
 
 ## 9. Getting Started
 
-Ready to build this yourself? Here's the quickstart.
+> Everything below is in the [companion repo](https://github.com/maheshbabugorantla/llm-observability-with-elasticapm). The repo README has the most up-to-date quickstart and troubleshooting steps.
 
 ### Prerequisites
 
@@ -459,8 +482,8 @@ git clone https://github.com/maheshbabugorantla/llm-observability-with-elasticap
 cd llm-observability-with-elasticapm
 
 # 2. Configure API keys
-cp app/.env.example app/.env
-# Edit app/.env and add your OPENAI_API_KEY and ANTHROPIC_API_KEY
+cp .env.example .env
+# Edit .env and add your OPENAI_API_KEY and ANTHROPIC_API_KEY
 
 # 3. Start the full stack
 docker compose up --build -d
@@ -503,17 +526,8 @@ curl -X POST http://localhost:5001/menu/design \
 
 ## Conclusion
 
-You now have a complete LLM observability stack built on open standards. Open-standard instrumentation (swap backends anytime), no proprietary agents, no $500/month SaaS bills.
+The entire stack runs locally in Docker Compose for development. The same architecture — OTel Collector, APM Server, Elasticsearch — scales to production with managed Elastic Cloud. Because every component speaks OTLP, you can swap the backend without touching your application code.
 
-Here's what you get:
-- **Cost tracking** — per-call, per-model, with automatic pricing lookup from LiteLLM's open-source pricing database
-- **Latency monitoring** — average and P95 response times, broken down by model and endpoint
-- **Error correlation** — failed LLM calls with full stack traces, retry counts, and trace context
-- **Multi-model comparison** — side-by-side metrics for GPT vs Claude vs any provider
-- **Trace correlation** — end-to-end visibility from HTTP request through multi-agent workflows to individual LLM calls
+The cost enrichment layer is the most opinionated piece. The demo uses a span exporter wrapper that mutates private attributes — good enough for local development, but for production, move to a `SpanProcessor` or emit cost as a separate OTel metric (see Section 8).
 
-The entire stack runs locally in Docker Compose for development, and the same architecture scales to production with managed Elasticsearch.
-
-Check out the [full source code on GitHub](https://github.com/maheshbabugorantla/llm-observability-with-elasticapm) — star it if you find it useful.
-
-**What's next?** In a future post, I might explore Kibana alerting rules (notify Slack when daily LLM cost exceeds $50), anomaly detection on token usage patterns, and prompt quality scoring using the captured completions data.
+Check out the [full source code on GitHub](https://github.com/maheshbabugorantla/llm-observability-with-elasticapm/tree/v1.0.0) — star it if you find it useful.
