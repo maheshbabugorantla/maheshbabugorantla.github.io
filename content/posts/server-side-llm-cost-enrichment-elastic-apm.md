@@ -664,7 +664,7 @@ echo "LLM cost enrichment is now active for all APM traces."
 echo "Test with: POST _ingest/pipeline/enrich-llm-costs/_simulate?verbose"
 ```
 
-The setup script and all pipeline configs are available in the [companion repo](https://github.com/maheshbabugorantla/llm-observability-with-elasticapm) under `elasticsearch/`.
+The setup script and all pipeline configs are available in the [companion repo](https://github.com/maheshbabugorantla/llm-observability-with-elasticapm/tree/v2.0.0) under `elasticsearch/`.
 
 ---
 
@@ -678,4 +678,4 @@ The tradeoff is real: you now have Elasticsearch infrastructure to manage (an en
 
 > **Cost math vs invoice reality:** The same caveat applies. Token-based estimates can differ from provider billing due to system prompts, cached tokens, tool call overhead, tiered pricing, and rounding. Treat this as an allocation and monitoring signal, not a perfect invoice replica.
 
-Check out the [companion repo](https://github.com/maheshbabugorantla/llm-observability-with-elasticapm) for the full source code, and the [original post](/posts/monitoring-llm-usage-elastic-apm-openllmetry/) for the end-to-end monitoring setup this builds on.
+Check out the [companion repo](https://github.com/maheshbabugorantla/llm-observability-with-elasticapm/tree/v2.0.0) for the full source code, and the [original post](/posts/monitoring-llm-usage-elastic-apm-openllmetry/) for the end-to-end monitoring setup this builds on.
