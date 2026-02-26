@@ -12,6 +12,9 @@ theme = 'PaperMod'
   ShowPostNavLinks = true
   ShowBreadCrumbs = true
 
+[params.author]
+  name = "Mahesh Babu Gorantla"
+
 [params.homeInfoParams]
   Title = "Hi, I'm Mahesh Babu Gorantla"
   Content = "Full-stack engineer writing about Python, Django, Kubernetes, and backend development"
